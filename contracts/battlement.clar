@@ -14,6 +14,7 @@
 (define-constant ERR_GAME_OVER (err u5))
 (define-constant ERR_TIMEOUT_NOT_REACHED (err u6))
 (define-constant ERR_WRONG_PLAYER (err u7))
+(define-constant ERR_INVALID_OPPONENT (err u8))
 
 ;; ---------- Data Structures ----------
 ;; Game state map - Note: We'll store games twice (once for each player order combination)
@@ -44,6 +45,11 @@
     (is-some (map-get? battles { player1: player1, player2: player2 }))
     (is-some (map-get? battles { player1: player2, player2: player1 }))
   )
+)
+
+;; Validate opponent is in a game with tx-sender
+(define-private (validate-opponent (opponent principal))
+  (game-exists tx-sender opponent)
 )
 
 ;; Check if it's the player's turn
@@ -79,14 +85,18 @@
   (>= (- (var-get current-block) last-move) TIMEOUT_BLOCKS)
 )
 
-;; Determine winner based on HP values
+;; Determine winner based on HP values - Adding validation to inputs
 (define-private (check-winner (hp1 uint) (hp2 uint) (player1 principal) (player2 principal))
-  (if (<= hp1 u0)
-      (some player2)
-      (if (<= hp2 u0)
-          (some player1)
-          none
-      )
+  ;; Both players must be in a valid game together
+  (if (game-exists player1 player2)
+    (if (<= hp1 u0)
+        (some player2)
+        (if (<= hp2 u0)
+            (some player1)
+            none
+        )
+    )
+    none  ;; If not in valid game, no winner can be determined
   )
 )
 
@@ -98,30 +108,36 @@
   )
 )
 
-;; Update game state in both orientations (p1-p2 and p2-p1)
+;; Update game state in both orientations (p1-p2 and p2-p1) with validation
 (define-private (update-game-state (player1 principal) (player2 principal) 
                                    (hp1 uint) (hp2 uint) 
                                    (turn principal) (winner (optional principal)))
-  (begin
-    ;; Update the game in both orientations to ensure consistency
-    (map-set battles { player1: player1, player2: player2 }
-      {
-        hp1: hp1,
-        hp2: hp2,
-        turn: turn,
-        winner: winner,
-        last-move: (var-get current-block)
-      })
+  ;; Only update if the game exists and players are valid
+  (if (game-exists player1 player2)
+    (begin
+      ;; Update the game in both orientations to ensure consistency
+      (map-set battles { player1: player1, player2: player2 }
+        {
+          hp1: hp1,
+          hp2: hp2,
+          turn: turn,
+          winner: winner,
+          last-move: (var-get current-block)
+        })
+        
+      ;; Also update with reversed player order for easy lookup
+      (map-set battles { player1: player2, player2: player1 }
+        {
+          hp1: hp2, ;; Note the swap of hp1/hp2 when players are reversed
+          hp2: hp1,
+          turn: turn,
+          winner: winner,
+          last-move: (var-get current-block)
+        })
       
-    ;; Also update with reversed player order for easy lookup
-    (map-set battles { player1: player2, player2: player1 }
-      {
-        hp1: hp2, ;; Note the swap of hp1/hp2 when players are reversed
-        hp2: hp1,
-        turn: turn,
-        winner: winner,
-        last-move: (var-get current-block)
-      })
+      true
+    )
+    false
   )
 )
 
@@ -138,9 +154,10 @@
     (asserts! (not (game-exists tx-sender opponent)) ERR_GAME_EXISTS)
     
     ;; Initialize the game with both orientations
-    (update-game-state tx-sender opponent 
+    (asserts! (update-game-state tx-sender opponent 
                       STARTING_HP STARTING_HP
-                      tx-sender none)
+                      tx-sender none) 
+              ERR_INVALID_OPPONENT)
     
     (ok true)
   )
@@ -150,6 +167,9 @@
 (define-public (attack (opponent principal))
   (begin
     (set-current-block)
+    
+    ;; Validate opponent first
+    (asserts! (validate-opponent opponent) ERR_INVALID_OPPONENT)
     
     ;; Check for direct match first (where tx-sender is player1)
     (match (map-get? battles { player1: tx-sender, player2: opponent })
@@ -164,10 +184,11 @@
           (new-hp2 (if (> current-hp2 ATTACK_DAMAGE) (- current-hp2 ATTACK_DAMAGE) u0))
           (new-winner (check-winner (get hp1 game) new-hp2 tx-sender opponent))
         )
-          ;; Update game state in both orientations
-          (update-game-state tx-sender opponent
+          ;; Update game state in both orientations with validation
+          (asserts! (update-game-state tx-sender opponent
                             (get hp1 game) new-hp2
                             opponent new-winner)
+                    ERR_INVALID_OPPONENT)
           
           (ok true)
         )
@@ -191,6 +212,9 @@
   (begin
     (set-current-block)
     
+    ;; Validate opponent first
+    (asserts! (validate-opponent opponent) ERR_INVALID_OPPONENT)
+    
     ;; Check for game where tx-sender is player2
     (match (map-get? battles { player1: opponent, player2: tx-sender })
       game (begin
@@ -204,10 +228,11 @@
           (new-hp1 (if (> current-hp1 ATTACK_DAMAGE) (- current-hp1 ATTACK_DAMAGE) u0))
           (new-winner (check-winner new-hp1 (get hp2 game) opponent tx-sender))
         )
-          ;; Update game state in both orientations
-          (update-game-state opponent tx-sender
+          ;; Update game state in both orientations with validation
+          (asserts! (update-game-state opponent tx-sender
                             new-hp1 (get hp2 game)
                             opponent new-winner)
+                    ERR_INVALID_OPPONENT)
           
           (ok true)
         )
@@ -231,6 +256,9 @@
   (begin
     (set-current-block)
     
+    ;; Validate opponent first
+    (asserts! (validate-opponent opponent) ERR_INVALID_OPPONENT)
+    
     ;; Find the game data - check both orientations
     (let ((game-data (find-game tx-sender opponent)))
       ;; Validate game exists and is not over
@@ -247,17 +275,20 @@
           ;; Validate timeout period has passed
           (asserts! (is-timeout-reached (get last-move game)) ERR_TIMEOUT_NOT_REACHED)
           
-          ;; Determine players' positions
-          (if (is-some (map-get? battles { player1: tx-sender, player2: opponent }))
-            ;; tx-sender is player1
-            (update-game-state tx-sender opponent
-                              (get hp1 game) (get hp2 game)
-                              (get turn game) (some tx-sender))
-                              
-            ;; tx-sender is player2
-            (update-game-state opponent tx-sender
-                              (get hp1 game) (get hp2 game)
-                              (get turn game) (some tx-sender))
+          ;; Determine players' positions and update with validation
+          (asserts!
+            (if (is-some (map-get? battles { player1: tx-sender, player2: opponent }))
+              ;; tx-sender is player1
+              (update-game-state tx-sender opponent
+                                (get hp1 game) (get hp2 game)
+                                (get turn game) (some tx-sender))
+                                
+              ;; tx-sender is player2
+              (update-game-state opponent tx-sender
+                                (get hp1 game) (get hp2 game)
+                                (get turn game) (some tx-sender))
+            )
+            ERR_INVALID_OPPONENT
           )
           
           (ok true)

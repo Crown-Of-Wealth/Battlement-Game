@@ -141,5 +141,3 @@ Smart Contract Developer • Blockchain Enthusiast
 ## 📄 License
 
 MIT License. Feel free to use, modify, and share.
-
----
