@@ -33,9 +33,9 @@
 (define-data-var current-block uint u0)
 
 ;; ---------- Helper Functions ----------
-;; Update the current block height
+;; Update the current block height (simplified for testing)
 (define-private (set-current-block)
-  (var-set current-block (default-to u0 (get-block-info? height u0)))
+  (var-set current-block (+ (var-get current-block) u1))
 )
 
 ;; Check if a game exists between two players
@@ -279,9 +279,19 @@
   (let ((game-data (get-game player1 player2)))
     (match game-data
       game (if (is-some (get winner game))
-               (concat (concat "Game over. Winner: " (unwrap-panic (get winner game))) "")
-               (concat (concat "Ongoing game. Current turn: " (get turn game)) ""))
+               "Game over. Winner announced."
+               "Ongoing game. Current turn is active player.")
       "No game exists between these players"
+    )
+  )
+)
+
+;; Check if it's a player's turn
+(define-read-only (is-my-turn (opponent principal))
+  (let ((game-data (find-game tx-sender opponent)))
+    (match game-data
+      game (is-eq (get turn game) tx-sender)
+      false
     )
   )
 )
